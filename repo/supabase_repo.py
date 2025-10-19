@@ -224,6 +224,12 @@ class SupabaseRepo:
             {"message_id": message_id}
         ).eq("session_id", session_id).execute()
 
+    def set_session_target(self, session_id: str, target_count: int) -> None:
+        """Обновить целевое количество игроков для сессии."""
+        self.client.table("gt_sessions").update(
+            {"target_count": target_count}
+        ).eq("session_id", session_id).execute()
+
     def close_session(self, session_id: str) -> None:
         self.client.table("gt_sessions").update(
             {"is_closed": True}

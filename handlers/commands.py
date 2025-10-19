@@ -16,7 +16,13 @@ from texts import (
 
 router = Router()
 
+# ====== Цель по умолчанию и индивидуальные дефолты по играм ======
 DEFAULT_TARGET = 10
+TARGET_BY_GAME = {
+    "doors": 6,  # 👈 для Doors хотим 6 человек
+}
+def target_for(game_key: str) -> int:
+    return TARGET_BY_GAME.get(game_key, DEFAULT_TARGET)
 
 
 # =========================
@@ -128,6 +134,63 @@ async def cmd_call_mafia(message: Message, repo: SupabaseRepo, session_service: 
 @router.message(Command("call_doors"))
 async def cmd_call_doors(message: Message, repo: SupabaseRepo, session_service: SessionService):
     await _call_by_key("doors", message, repo, session_service)
+
+
+# =========================
+# УПРАВЛЕНИЕ ЦЕЛЬЮ НАБОРА
+# =========================
+@router.message(Command("target"))
+async def cmd_target(
+    message: Message,
+    repo: SupabaseRepo,
+    session_service: SessionService,
+    command: CommandObject,
+):
+    """
+    /target <число> — сменить цель (например, 6) для текущей активной сессии в этом чате.
+    Работает только для админов/ведущих.
+    """
+    chat_id = message.chat.id
+    u = message.from_user
+    bot: Bot = message.bot
+
+    if not await is_admin_or_leader(bot, repo, chat_id, u.id):
+        await message.reply(NO_RIGHTS)
+        return
+
+    arg = (command.args or "").strip()
+    if not arg.isdigit():
+        await message.reply("Укажи число: например <code>/target 6</code>")
+        return
+    new_target = int(arg)
+    if not (1 <= new_target <= 1000):
+        await message.reply("Число должно быть от 1 до 1000.")
+        return
+
+    # найдём самую свежую активную сессию в этом чате (любой игры)
+    res = (
+        repo.client.table("gt_sessions")
+        .select("*")
+        .eq("chat_id", chat_id)
+        .eq("is_closed", False)
+        .order("created_at", desc=True)
+        .limit(1)
+        .execute()
+        .data
+    )
+    if not res:
+        await message.reply("Активная сессия не найдена.")
+        return
+    session = res[0]
+
+    # обновим цель
+    repo.set_session_target(session["session_id"], new_target)
+    session["target_count"] = new_target  # чтобы перерисовать сразу корректно
+
+    # перерисуем «шапку»
+    preset = repo.get_preset(session["game_key"])
+    await session_service.post_or_get_session_message(chat_id, preset, session)
+    await message.reply(f"Цель набора обновлена: <b>{new_target}</b>")
 
 
 # =========================
@@ -268,7 +331,9 @@ async def _ensure_session_and_controls(
 
     session = repo.get_active_session(chat_id, preset.game_key)
     if not session:
-        session = repo.create_session(chat_id, preset.game_key, u.id, target_count=DEFAULT_TARGET)
+        session = repo.create_session(
+            chat_id, preset.game_key, u.id, target_count=target_for(preset.game_key)
+        )
 
     # публикуем/обновляем «шапку» сессии и даём кнопку «Позвать всех на {title}»
     await session_service.post_or_get_session_message(chat_id, preset, session)

@@ -8,9 +8,7 @@ WELCOME = (
     "• <code>/call &lt;игра&gt;</code> — начать набор (пример: <code>/call codenames</code>)\n"
     "• /optout — не упоминать меня\n"
     "• /optin — снова упоминать\n"
-    "Также доступны алиасы: "
-    "<code>/call_codenames</code>, <code>/call_bunker</code>, <code>/call_alias</code>, "
-    "<code>/call_gartic</code>, <code>/call_mafia</code>, <code>/call_doors</code>\n"
+    "\n\nТакже доступны команды: "
 )
 
 def header(game_title: str, emoji: Optional[str] = None) -> str:
