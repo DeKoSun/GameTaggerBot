@@ -13,6 +13,7 @@ from services.sessions import SessionService
 from services.tagging import TaggingService
 from handlers import commands as commands_handler
 from handlers import callbacks as callbacks_handler
+from handlers import misc as misc_handler
 
 
 def setup_logging() -> None:
@@ -55,6 +56,7 @@ async def main() -> None:
     # Роутеры
     dp.include_router(commands_handler.router)
     dp.include_router(callbacks_handler.router)
+    dp.include_router(misc_handler.router)
 
     # Простая middleware для передачи зависимостей в handlers
     class InjectMiddleware:
