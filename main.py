@@ -3,6 +3,7 @@ import logging
 import os
 
 from aiogram import Bot, Dispatcher
+from aiogram.client.default import DefaultBotProperties
 from aiogram.fsm.storage.memory import MemoryStorage
 from dotenv import load_dotenv
 
@@ -17,10 +18,7 @@ from handlers import callbacks as callbacks_handler
 def setup_logging() -> None:
     level_name = os.getenv("LOG_LEVEL", "INFO").upper()
     level = getattr(logging, level_name, logging.INFO)
-    logging.basicConfig(
-        level=level,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s"
-    )
+    logging.basicConfig(level=level, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
 
 async def main() -> None:
@@ -28,7 +26,7 @@ async def main() -> None:
     load_dotenv()
     setup_logging()
 
-    # ВАЖНО: читаем .env после load_dotenv()
+    # Читаем .env после load_dotenv()
     settings = Settings.from_env()
 
     # Явные проверки, чтобы в логах была понятная ошибка если что-то не задано
@@ -43,7 +41,10 @@ async def main() -> None:
         raise RuntimeError(f"Missing env vars: {', '.join(missing)}")
 
     # HTML для корректных упоминаний <a href="tg://user?id=...">...</a>
-    bot = Bot(settings.bot_token, parse_mode="HTML")
+    bot = Bot(
+        token=settings.bot_token,
+        default=DefaultBotProperties(parse_mode="HTML")
+    )
     dp = Dispatcher(storage=MemoryStorage())
 
     # DI
@@ -55,7 +56,7 @@ async def main() -> None:
     dp.include_router(commands_handler.router)
     dp.include_router(callbacks_handler.router)
 
-    # Простейший middleware для передачи зависимостей в handlers
+    # Простая middleware для передачи зависимостей в handlers
     class InjectMiddleware:
         async def __call__(self, handler, event, data):
             data.setdefault("repo", repo)
