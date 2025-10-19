@@ -165,6 +165,27 @@ class SupabaseRepo:
             emoji=data.get("emoji"),
         )
 
+    def list_active_presets(self) -> list[Preset]:
+        """Список активных игр для /games и /call <игра>."""
+        res = (
+            self.client.table("gt_game_presets")
+            .select("game_key,title,invite_lines,emoji,is_active")
+            .eq("is_active", True)
+            .order("title", desc=False)
+            .execute()
+        )
+        items: list[Preset] = []
+        for row in (res.data or []):
+            items.append(
+                Preset(
+                    game_key=row["game_key"],
+                    title=row["title"],
+                    invite_lines=row.get("invite_lines") or [],
+                    emoji=row.get("emoji"),
+                )
+            )
+        return items
+
     # ---------------------------
     # Sessions
     # ---------------------------

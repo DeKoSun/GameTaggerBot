@@ -1,12 +1,14 @@
 from __future__ import annotations
-from typing import Optional
+from typing import Optional, List
 
 # Короткая справка для /start
 WELCOME = (
     "Привет! Я помогаю тегать участников на быстрые игры.\n"
+    "• /games — список игр\n"
+    "• /call <игра> — начать набор (пример: /call codenames)\n"
     "• /optout — не упоминать меня\n"
     "• /optin — снова упоминать\n"
-    "• /call_codenames — начать набор на Codenames (для ведущих/админов)\n"
+    "Также доступны алиасы: /call_codenames, /call_bunker, /call_alias, /call_gartic, /call_mafia, /call_doors\n"
 )
 
 def header(game_title: str, emoji: Optional[str] = None) -> str:
@@ -17,10 +19,10 @@ def header(game_title: str, emoji: Optional[str] = None) -> str:
     e = f"{emoji} " if emoji else ""
     return f"{e}**{game_title}** — набор открыт!"
 
-# Резюме (оставляем для совместимости, но sessions.py формирует собственную сводку)
+# Резюме (оставлено для совместимости; sessions.py формирует сводку самостоятельно)
 SUMMARY_TITLE = "\n\n**Сводка:**"
-def summary_lines(going: list[str], maybe: list[str], nope: list[str], target: int) -> str:
-    parts: list[str] = [SUMMARY_TITLE]
+def summary_lines(going: List[str], maybe: List[str], nope: List[str], target: int) -> str:
+    parts: List[str] = [SUMMARY_TITLE]
     parts.append(f"Иду ({len(going)}/{target}): " + (", ".join(going) if going else "—"))
     parts.append(f"Может быть ({len(maybe)}): " + (", ".join(maybe) if maybe else "—"))
     parts.append(f"Не сегодня ({len(nope)}): " + (", ".join(nope) if nope else "—"))
@@ -29,12 +31,11 @@ def summary_lines(going: list[str], maybe: list[str], nope: list[str], target: i
 # Плашка «укомплектовано» (без разметки — sessions.py экранирует)
 FULLY_STAFFED = "✅ Набор укомплектован."
 
-# Текст кнопок
-BUTTON_CALL_ALL = "Позвать всех на Codenames"
-BUTTON_CONTINUE = "Продолжить набор"
-BUTTON_CLOSE = "Закрыть набор"
-BUTTON_CLEAR = "Очистить RSVP"
+# Динамическая подпись кнопки «Позвать всех на <игра>»
+def button_call_all(game_title: str) -> str:
+    return f"Позвать всех на {game_title}"
 
+# Резервные подписи (используются в SessionService)
 BTN_GO = "🧩 Иду"
 BTN_MAYBE = "⏳ Через 10 мин"
 BTN_NO = "🙅 Не сегодня"
