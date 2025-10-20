@@ -21,18 +21,19 @@ router = Router()
 
 # ===== Локальная проверка прав (без внешнего permissions.py) =====
 async def is_admin_or_leader(bot: Bot, repo: SupabaseRepo, chat_id: int, user_id: int) -> bool:
+    # «Ведущий» из базы
     try:
         if repo.is_leader(chat_id, user_id):
             return True
     except Exception:
         pass
+    # Создатель/админ чата
     try:
         member = await bot.get_chat_member(chat_id, user_id)
         return getattr(member, "status", None) in {"creator", "administrator"}
     except Exception:
         return False
 # ==================================================================
-
 
 # ====== Цели по умолчанию ======
 DEFAULT_TARGET = 10
@@ -102,7 +103,7 @@ async def cmd_games(message: Message, repo: SupabaseRepo):
 # =========================
 # /call <игра> — универсальный запуск набора
 # =========================
-@router.message(Command("call")))
+@router.message(Command("call"))  # <-- фикс: без лишней скобки
 async def cmd_call(
     message: Message,
     repo: SupabaseRepo,
