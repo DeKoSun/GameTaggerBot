@@ -55,7 +55,7 @@ async def cmd_start(message: Message, repo: SupabaseRepo):
     await message.reply(
         "Привет! Я помогаю тегать участников на быстрые игры.\n\n"
         "• /games — список игр\n"
-        "• /call <игра> — начать набор (пример: /call codenames)\n"
+        "• <code>/call &lt;игра&gt;</code> — начать набор (пример: <code>/call codenames</code>)\n"
         "• /optout — не упоминать меня\n"
         "• /optin — снова упоминать\n\n"
         "Также доступны алиасы: /call_codenames, /call_bunker, /call_alias, "
@@ -103,7 +103,7 @@ async def cmd_games(message: Message, repo: SupabaseRepo):
 # =========================
 # /call <игра> — универсальный запуск набора
 # =========================
-@router.message(Command("call"))  # <-- фикс: без лишней скобки
+@router.message(Command("call"))
 async def cmd_call(
     message: Message,
     repo: SupabaseRepo,
