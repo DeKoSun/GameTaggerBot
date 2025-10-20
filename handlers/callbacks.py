@@ -6,7 +6,12 @@ from aiogram.types import CallbackQuery
 from repo.supabase_repo import SupabaseRepo
 from services.sessions import SessionService
 from services.tagging import TaggingService
-from permissions import is_admin_or_leader  # ← у тебя файл permissions.py в корне проекта
+
+# Устойчивый импорт прав: корень проекта или пакет handlers
+try:
+    from permissions import is_admin_or_leader  # файл в корне проекта
+except ModuleNotFoundError:
+    from .permissions import is_admin_or_leader  # если лежит рядом в handlers/
 
 router = Router()
 
@@ -25,7 +30,11 @@ async def cb_rsvp(
     try:
         _, status, session_id = call.data.split(":", 2)
     except Exception:
-        await call.answer("Ошибка формата.", show_alert=True)
+        await call.answer("Некорректные данные.", show_alert=True)
+        return
+
+    if status not in {"going", "maybe", "no"}:
+        await call.answer("Неизвестный статус.", show_alert=True)
         return
 
     user = call.from_user
@@ -34,7 +43,11 @@ async def cb_rsvp(
         return
 
     # ---- пишем RSVP
-    repo.upsert_rsvp(session_id, user.id, status)
+    try:
+        repo.upsert_rsvp(session_id, user.id, status)
+    except Exception:
+        await call.answer("Не удалось сохранить ответ, попробуйте ещё раз.", show_alert=True)
+        return
 
     # ---- если "Не сегодня" — ставим кулдаун на 6 часов в этом чате
     if status == "no" and call.message and call.message.chat:
@@ -51,7 +64,7 @@ async def cb_rsvp(
 
     # ---- обновляем сводку под шапкой сессии
     if not call.message:
-        await call.answer("OK")
+        await call.answer("Принято")
         return
 
     session = repo.get_session(session_id)
@@ -83,7 +96,7 @@ async def cb_call_all(
     try:
         _, session_id, game_key = call.data.split(":", 2)
     except Exception:
-        await call.answer("Ошибка формата.", show_alert=True)
+        await call.answer("Некорректные данные.", show_alert=True)
         return
 
     chat_id = call.message.chat.id if call.message else None
@@ -92,11 +105,15 @@ async def cb_call_all(
         return
 
     # ---- проверка прав по нажимающему
-    if not await is_admin_or_leader(call.message.bot, repo, chat_id, call.from_user.id):
+    try:
+        allowed = await is_admin_or_leader(call.message.bot, repo, chat_id, call.from_user.id)
+    except Exception:
+        allowed = False
+    if not allowed:
         await call.answer("Нет прав.", show_alert=True)
         return
 
-    # ---- проверяем пресет и активную сессию
+    # ---- проверяем пресет и актуальную сессию
     preset = repo.get_preset(game_key)
     if not preset:
         await call.answer("Пресет не найден.", show_alert=True)
@@ -107,10 +124,10 @@ async def cb_call_all(
         await call.answer("Сессия закрыта или отсутствует.", show_alert=True)
         return
 
-    # (опц.) можно сверять session_id из callback с актуальной сессией:
-    # if session_id != session["session_id"]:
-    #     await call.answer("Эта сессия устарела. Обновите сообщение набора.", show_alert=True)
-    #     return
+    # Жёсткая защита от старых сообщений набора
+    if session_id != session.get("session_id"):
+        await call.answer("Это устаревшее сообщение набора. Откройте актуальное.", show_alert=True)
+        return
 
     # ---- список кандидатов к упоминанию (учитывает optout, исключения и кулдаун)
     try:
