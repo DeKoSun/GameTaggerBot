@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Optional, List, Tuple, Dict, Any
+from datetime import datetime, timedelta, timezone
 
 from supabase import create_client, Client
 
@@ -264,3 +265,64 @@ class SupabaseRepo:
             else:
                 nope.append(uid)
         return going, maybe, nope
+
+    # ---------------------------
+    # Cooldowns (Не сегодня)
+    # ---------------------------
+
+    def set_no_cooldown(self, chat_id: int, user_id: int, hours: int = 6, reason: str = "no") -> None:
+        """
+        Установить/обновить кулдаун 'не тегать' для пользователя в чате.
+        Требуется таблица public.gt_cooldowns (chat_id, user_id, until_at timestamptz, reason).
+        """
+        until = datetime.now(timezone.utc) + timedelta(hours=hours)
+        self.client.table("gt_cooldowns").upsert(
+            {
+                "chat_id": chat_id,
+                "user_id": user_id,
+                "until_at": until.isoformat(),
+                "reason": reason,
+            }
+        ).execute()
+
+    def list_invitees(self, chat_id: int) -> list[int]:
+        """
+        Список user_id, которых можно тегать в данном чате:
+        - известные боту (gt_users)
+        - НЕ opted_out
+        - НЕ в gt_exclusions для этого чата
+        - НЕТ активного кулдауна gt_cooldowns.until_at > now()
+        """
+        # 1) все не-опт-аут
+        users = (
+            self.client.table("gt_users")
+            .select("user_id")
+            .eq("is_opted_out", False)
+            .execute()
+            .data or []
+        )
+        user_ids = {u["user_id"] for u in users}
+
+        # 2) исключенные в этом чате
+        excluded = (
+            self.client.table("gt_exclusions")
+            .select("user_id")
+            .eq("chat_id", chat_id)
+            .execute()
+            .data or []
+        )
+        excl = {r["user_id"] for r in excluded}
+
+        # 3) активные кулдауны в этом чате
+        now_iso = datetime.now(timezone.utc).isoformat()
+        cooldowns = (
+            self.client.table("gt_cooldowns")
+            .select("user_id,until_at")
+            .eq("chat_id", chat_id)
+            .gt("until_at", now_iso)
+            .execute()
+            .data or []
+        )
+        cd = {r["user_id"] for r in cooldowns}
+
+        return [uid for uid in user_ids if uid not in excl and uid not in cd]

@@ -16,7 +16,11 @@ async def cb_rsvp(
     repo: SupabaseRepo,
     session_service: SessionService,
 ):
-    # формат: rsvp:<status>:<session_id>
+    """
+    Формат callback_data: rsvp:<status>:<session_id>
+    status ∈ {going, maybe, no}
+    """
+    # ---- разбор данных
     try:
         _, status, session_id = call.data.split(":", 2)
     except Exception:
@@ -28,10 +32,18 @@ async def cb_rsvp(
         await call.answer()
         return
 
-    # записываем RSVP
+    # ---- пишем RSVP
     repo.upsert_rsvp(session_id, user.id, status)
 
-    # обновляем сводку под шапкой сессии
+    # ---- если "Не сегодня" — ставим кулдаун на 6 часов в этом чате
+    if status == "no" and call.message and call.message.chat:
+        try:
+            repo.set_no_cooldown(chat_id=call.message.chat.id, user_id=user.id, hours=6, reason="no")
+        except Exception:
+            # мягко игнорируем сбой Supabase — UX важнее
+            pass
+
+    # ---- обновляем сводку под шапкой сессии
     if not call.message:
         await call.answer("OK")
         return
@@ -65,7 +77,10 @@ async def cb_call_all(
     repo: SupabaseRepo,
     tagging: TaggingService,
 ):
-    # формат: callall:<session_id>:<game_key>
+    """
+    Формат callback_data: callall:<session_id>:<game_key>
+    """
+    # ---- разбор данных
     try:
         _, session_id, game_key = call.data.split(":", 2)
     except Exception:
@@ -77,13 +92,13 @@ async def cb_call_all(
         await call.answer()
         return
 
-    # проверка прав по нажимающему
+    # ---- проверка прав по нажимающему
     from utils.permissions import is_admin_or_leader
-
     if not await is_admin_or_leader(call.message.bot, repo, chat_id, call.from_user.id):
         await call.answer("Нет прав.", show_alert=True)
         return
 
+    # ---- проверяем пресет и активную сессию
     preset = repo.get_preset(game_key)
     if not preset:
         await call.answer("Пресет не найден.", show_alert=True)
@@ -94,33 +109,22 @@ async def cb_call_all(
         await call.answer("Сессия закрыта или отсутствует.", show_alert=True)
         return
 
-    # Берём известных боту пользователей (не opted_out) и не исключённых в этом чате
-    users = (
-        repo.client.table("gt_users")
-        .select("user_id,username")
-        .eq("is_opted_out", False)
-        .execute()
-        .data
-        or []
-    )
-    excluded = set(
-        r["user_id"]
-        for r in (
-            repo.client.table("gt_exclusions")
-            .select("user_id")
-            .eq("chat_id", chat_id)
-            .execute()
-            .data
-            or []
-        )
-    )
+    # ---- список кандидатов к упоминанию (учитывает optout, исключения и кулдаун)
+    try:
+        invitees = repo.list_invitees(chat_id)
+    except Exception:
+        await call.answer("Ошибка загрузки списка участников.", show_alert=True)
+        return
 
-    invitees = [u["user_id"] for u in users if u["user_id"] not in excluded]
     if not invitees:
         await call.answer("Нет подходящих участников.", show_alert=True)
         return
 
     await call.answer("Зову всех…")
-    await tagging.batch_tag(
-        chat_id, preset, invitees, per_batch=15, pause=1.5, session_id=session_id
-    )
+    try:
+        await tagging.batch_tag(
+            chat_id, preset, invitees, per_batch=15, pause=1.5, session_id=session_id
+        )
+    except Exception:
+        # не роняем колбэк при сетевых/лимитных ошибках
+        pass
