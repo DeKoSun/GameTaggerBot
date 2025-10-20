@@ -22,6 +22,7 @@ class TaggingService:
       - Конвертирует **bold** из шаблонов в <b>bold</b>
       - Отправляет партиями с паузами
       - Может остановиться, если по сессии набралось target_count 'going'
+      - Анти-повтор: не повторяет одну и ту же invite-фразу подряд для одной игры
     """
 
     def __init__(self, bot: Bot, repo: SupabaseRepo) -> None:
@@ -72,15 +73,54 @@ class TaggingService:
         Строит текст батча построчно:
           <a href="tg://user?id=...">label</a> — <invite_line>
         """
+        # анти-повтор: берём новую фразу с учётом последней
+        invite_html = self._pick_invite_line_html(preset)
+
         lines: List[str] = []
         for uid in user_ids:
             label = self._label_for_user(uid)
             mention = f'<a href="tg://user?id={uid}">{label}</a>'
-            invite_raw = random.choice(preset.invite_lines) if preset.invite_lines else ""
-            invite_html = self._md_to_html(invite_raw)
             lines.append(f"{mention} — {invite_html}")
         # Сообщение отправляется с parse_mode=HTML
         return "\n".join(lines)
+
+    def _pick_invite_line_html(self, preset: Preset) -> str:
+        """
+        Выбираем invite-фразу с анти-повтором:
+        - читаем из app_settings последнюю фразу для игры
+        - выбираем новую, отличную от последней (если это возможно)
+        - сохраняем как последнюю
+        - конвертируем **жирный** в <b>…</b> и экранируем остальное
+        """
+        lines = preset.invite_lines or []
+        if not lines:
+            return ""
+
+        last_key = f"last_invite_{preset.game_key}"
+        try:
+            last_line = self.repo.get_app_setting(last_key)
+        except Exception:
+            last_line = None
+
+        # Если только одна строка в пуле — берём её
+        if len(lines) == 1:
+            chosen = lines[0]
+        else:
+            chosen = random.choice(lines)
+            if last_line and chosen == last_line:
+                # выбрать альтернативу
+                alts = [x for x in lines if x != last_line]
+                if alts:
+                    chosen = random.choice(alts)
+
+        # сохраняем выбранную строку как последнюю
+        try:
+            self.repo.set_app_setting(last_key, chosen)
+        except Exception:
+            # не критично, продолжаем без сохранения
+            pass
+
+        return self._md_to_html(chosen)
 
     def _label_for_user(self, user_id: int) -> str:
         """

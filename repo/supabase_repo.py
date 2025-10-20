@@ -29,6 +29,33 @@ class SupabaseRepo:
         )
 
     # ---------------------------
+    # App settings (глобальные настройки)
+    # ---------------------------
+
+    def get_app_setting(self, key: str) -> Optional[str]:
+        """
+        Таблица: gt_app_settings (key text primary key, value text, updated_at timestamptz).
+        Возвращает строку value или None.
+        """
+        res = (
+            self.client.table("gt_app_settings")
+            .select("value")
+            .eq("key", key)
+            .maybe_single()
+            .execute()
+        )
+        data = res.data or {}
+        val = data.get("value")
+        if val is None:
+            return None
+        return val if isinstance(val, str) else str(val)
+
+    def set_app_setting(self, key: str, value: str) -> None:
+        self.client.table("gt_app_settings").upsert(
+            {"key": key, "value": value}
+        ).execute()
+
+    # ---------------------------
     # Users
     # ---------------------------
 
@@ -190,6 +217,29 @@ class SupabaseRepo:
     # ---------------------------
     # Sessions
     # ---------------------------
+
+    def get_session(self, session_id: str) -> Optional[Dict[str, Any]]:
+        res = (
+            self.client.table("gt_sessions")
+            .select("*")
+            .eq("session_id", session_id)
+            .maybe_single()
+            .execute()
+        )
+        return res.data or None
+
+    def get_latest_active_session(self, chat_id: int) -> Optional[Dict[str, Any]]:
+        res = (
+            self.client.table("gt_sessions")
+            .select("*")
+            .eq("chat_id", chat_id)
+            .eq("is_closed", False)
+            .order("created_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+        rows = res.data or []
+        return rows[0] if rows else None
 
     def get_active_session(self, chat_id: int, game_key: str) -> Optional[Dict[str, Any]]:
         res = (
