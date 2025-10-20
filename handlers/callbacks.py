@@ -2,18 +2,34 @@ from __future__ import annotations
 
 from aiogram import Router
 from aiogram.types import CallbackQuery
+from aiogram.exceptions import TelegramBadRequest
 
-from repo.supabase_repo import SupabaseRepo
-from services.sessions import SessionService
-from services.tagging import TaggingService
-
-# Устойчивый импорт прав: корень проекта или пакет handlers
-try:
-    from permissions import is_admin_or_leader  # файл в корне проекта
-except ModuleNotFoundError:
-    from .permissions import is_admin_or_leader  # если лежит рядом в handlers/
+# Импортируем по абсолютным именам из корня проекта
+from supabase_repo import SupabaseRepo
+from sessions import SessionService
+from tagging import TaggingService
 
 router = Router()
+
+
+# ===== Локальная проверка прав (чтобы не зависеть от permissions.py) =====
+async def is_admin_or_leader(bot, repo: SupabaseRepo, chat_id: int, user_id: int) -> bool:
+    # Сначала — «ведущий» из базы
+    try:
+        if repo.is_leader(chat_id, user_id):
+            return True
+    except Exception:
+        pass
+
+    # Затем — админ/создатель чата
+    try:
+        member = await bot.get_chat_member(chat_id, user_id)
+        return getattr(member, "status", None) in {"creator", "administrator"}
+    except TelegramBadRequest:
+        return False
+    except Exception:
+        return False
+# ========================================================================
 
 
 @router.callback_query(lambda c: c.data and c.data.startswith("rsvp:"))
@@ -59,8 +75,7 @@ async def cb_rsvp(
                 reason="no",
             )
         except Exception:
-            # мягко игнорируем сбой Supabase — UX важнее
-            pass
+            pass  # не критично
 
     # ---- обновляем сводку под шапкой сессии
     if not call.message:
