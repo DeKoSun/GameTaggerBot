@@ -5,12 +5,21 @@ from aiogram.filters import Command, CommandObject
 from aiogram.types import Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-from supabase_repo import SupabaseRepo, Preset
-from sessions import SessionService
+# --- устойчивые импорты: корень проекта или подпапки repo/ и services/ ---
+try:
+    from supabase_repo import SupabaseRepo, Preset
+except ModuleNotFoundError:
+    from repo.supabase_repo import SupabaseRepo, Preset
+
+try:
+    from sessions import SessionService
+except ModuleNotFoundError:
+    from services.sessions import SessionService
+# -------------------------------------------------------------------------
 
 router = Router()
 
-# ===== Локальная проверка прав (чтобы не зависеть от внешнего permissions.py) =====
+# ===== Локальная проверка прав (без внешнего permissions.py) =====
 async def is_admin_or_leader(bot: Bot, repo: SupabaseRepo, chat_id: int, user_id: int) -> bool:
     try:
         if repo.is_leader(chat_id, user_id):
@@ -22,12 +31,13 @@ async def is_admin_or_leader(bot: Bot, repo: SupabaseRepo, chat_id: int, user_id
         return getattr(member, "status", None) in {"creator", "administrator"}
     except Exception:
         return False
-# =================================================================================
+# ==================================================================
 
 
-# ====== Цель по умолчанию и индивидуальные дефолты по играм ======
+# ====== Цели по умолчанию ======
 DEFAULT_TARGET = 10
-TARGET_BY_GAME = {"doors": 6}  # 👈 для Doors хотим 6 человек
+TARGET_BY_GAME = {"doors": 6}  # Doors хотим 6 человек
+
 def target_for(game_key: str) -> int:
     return TARGET_BY_GAME.get(game_key, DEFAULT_TARGET)
 
@@ -47,7 +57,8 @@ async def cmd_start(message: Message, repo: SupabaseRepo):
         "• /call <игра> — начать набор (пример: /call codenames)\n"
         "• /optout — не упоминать меня\n"
         "• /optin — снова упоминать\n\n"
-        "Также доступны алиасы: /call_codenames, /call_bunker, /call_alias, /call_gartic, /call_mafia, /call_doors."
+        "Также доступны алиасы: /call_codenames, /call_bunker, /call_alias, "
+        "/call_gartic, /call_mafia, /call_doors."
     )
 
 
@@ -91,13 +102,17 @@ async def cmd_games(message: Message, repo: SupabaseRepo):
 # =========================
 # /call <игра> — универсальный запуск набора
 # =========================
-@router.message(Command("call"))
+@router.message(Command("call")))
 async def cmd_call(
     message: Message,
     repo: SupabaseRepo,
     session_service: SessionService,
     command: CommandObject,
 ):
+    if not message.chat or message.chat.type not in {"group", "supergroup"}:
+        await message.reply("Эта команда работает только в группах.")
+        return
+
     chat_id = message.chat.id
     u = message.from_user
     if not u:
@@ -188,6 +203,15 @@ def _find_preset(repo: SupabaseRepo, query: str) -> Preset | None:
 async def _call_by_key(
     game_key: str, message: Message, repo: SupabaseRepo, session_service: SessionService
 ):
+    if not message.chat or message.chat.type not in {"group", "supergroup"}:
+        await message.reply("Эта команда работает только в группах.")
+        return
+
+    bot: Bot = message.bot
+    if not await is_admin_or_leader(bot, repo, message.chat.id, message.from_user.id):
+        await message.reply("⛔ Эту команду могут использовать только админы или ведущие.")
+        return
+
     preset = repo.get_preset(game_key)
     if not preset:
         await message.reply("Пресет не найден или отключён.")
