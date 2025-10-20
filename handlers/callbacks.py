@@ -6,6 +6,7 @@ from aiogram.types import CallbackQuery
 from repo.supabase_repo import SupabaseRepo
 from services.sessions import SessionService
 from services.tagging import TaggingService
+from permissions import is_admin_or_leader  # ← у тебя файл permissions.py в корне проекта
 
 router = Router()
 
@@ -38,7 +39,12 @@ async def cb_rsvp(
     # ---- если "Не сегодня" — ставим кулдаун на 6 часов в этом чате
     if status == "no" and call.message and call.message.chat:
         try:
-            repo.set_no_cooldown(chat_id=call.message.chat.id, user_id=user.id, hours=6, reason="no")
+            repo.set_no_cooldown(
+                chat_id=call.message.chat.id,
+                user_id=user.id,
+                hours=6,
+                reason="no",
+            )
         except Exception:
             # мягко игнорируем сбой Supabase — UX важнее
             pass
@@ -48,21 +54,14 @@ async def cb_rsvp(
         await call.answer("OK")
         return
 
-    session = (
-        repo.client.table("gt_sessions")
-        .select("*")
-        .eq("session_id", session_id)
-        .maybe_single()
-        .execute()
-        .data
-    )
+    session = repo.get_session(session_id)
     if not session:
-        await call.answer("Сессия не найдена.")
+        await call.answer("Сессия не найдена.", show_alert=True)
         return
 
     preset = repo.get_preset(session["game_key"])
     if not preset:
-        await call.answer("Пресет не найден.")
+        await call.answer("Пресет не найден.", show_alert=True)
         return
 
     await session_service.post_or_get_session_message(
@@ -93,7 +92,6 @@ async def cb_call_all(
         return
 
     # ---- проверка прав по нажимающему
-    from utils.permissions import is_admin_or_leader
     if not await is_admin_or_leader(call.message.bot, repo, chat_id, call.from_user.id):
         await call.answer("Нет прав.", show_alert=True)
         return
@@ -108,6 +106,11 @@ async def cb_call_all(
     if not session:
         await call.answer("Сессия закрыта или отсутствует.", show_alert=True)
         return
+
+    # (опц.) можно сверять session_id из callback с актуальной сессией:
+    # if session_id != session["session_id"]:
+    #     await call.answer("Эта сессия устарела. Обновите сообщение набора.", show_alert=True)
+    #     return
 
     # ---- список кандидатов к упоминанию (учитывает optout, исключения и кулдаун)
     try:

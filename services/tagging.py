@@ -7,6 +7,8 @@ import re
 from typing import Optional, List
 
 from aiogram import Bot
+from aiogram.exceptions import TelegramBadRequest
+
 from repo.supabase_repo import SupabaseRepo, Preset
 
 
@@ -23,6 +25,7 @@ class TaggingService:
       - Отправляет партиями с паузами
       - Может остановиться, если по сессии набралось target_count 'going'
       - Анти-повтор: не повторяет одну и ту же invite-фразу подряд для одной игры
+      - Фильтрует тех, кто реально состоит в чате (creator/administrator/member)
     """
 
     def __init__(self, bot: Bot, repo: SupabaseRepo) -> None:
@@ -48,6 +51,12 @@ class TaggingService:
         per_batch = max(1, int(per_batch))
         invitees = list(dict.fromkeys(invitees))  # unique, сохраняем порядок
 
+        # NEW: фильтруем только тех, кто реально состоит в чате сейчас
+        invitees = await self.filter_present_members(chat_id, invitees)
+        if not invitees:
+            await self._safe_send_message(chat_id, "Некого звать: в чате нет подходящих участников.")
+            return
+
         for start in range(0, len(invitees), per_batch):
             batch = invitees[start : start + per_batch]
             text = self._build_batch_text(preset, batch)
@@ -65,6 +74,31 @@ class TaggingService:
                 break
 
             await asyncio.sleep(pause)
+
+    # -------------------------- presence filter --------------------------
+
+    async def filter_present_members(self, chat_id: int, user_ids: List[int]) -> List[int]:
+        """
+        Возвращает только тех user_id, кто реально состоит в чате:
+        статусы creator/administrator/member. Остальные (left/kicked/restricted) отбрасываются.
+        """
+        ok_status = {"creator", "administrator", "member"}
+        sem = asyncio.Semaphore(20)  # ограничим параллелизм, чтобы не словить FLOOD
+
+        async def check(uid: int) -> tuple[int, bool]:
+            async with sem:
+                try:
+                    m = await self.bot.get_chat_member(chat_id, uid)
+                    return uid, (getattr(m, "status", None) in ok_status)
+                except TelegramBadRequest:
+                    # пользователя нельзя проверить или его нет в чате
+                    return uid, False
+                except Exception:
+                    # сетевые/прочие — тихо отбрасываем
+                    return uid, False
+
+        results = await asyncio.gather(*(check(uid) for uid in user_ids))
+        return [uid for uid, ok in results if ok]
 
     # -------------------------- helpers --------------------------
 
@@ -87,7 +121,7 @@ class TaggingService:
     def _pick_invite_line_html(self, preset: Preset) -> str:
         """
         Выбираем invite-фразу с анти-повтором:
-        - читаем из app_settings последнюю фразу для игры
+        - читаем из gt_app_settings последнюю фразу для игры
         - выбираем новую, отличную от последней (если это возможно)
         - сохраняем как последнюю
         - конвертируем **жирный** в <b>…</b> и экранируем остальное
