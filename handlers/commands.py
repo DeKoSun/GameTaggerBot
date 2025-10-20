@@ -5,22 +5,29 @@ from aiogram.filters import Command, CommandObject
 from aiogram.types import Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-from repo.supabase_repo import SupabaseRepo, Preset
-from services.sessions import SessionService
-from utils.permissions import is_admin_or_leader
-from texts import (
-    WELCOME,
-    NO_RIGHTS,
-    button_call_all,  # динамическая подпись кнопки
-)
+from supabase_repo import SupabaseRepo, Preset
+from sessions import SessionService
 
 router = Router()
 
+# ===== Локальная проверка прав (чтобы не зависеть от внешнего permissions.py) =====
+async def is_admin_or_leader(bot: Bot, repo: SupabaseRepo, chat_id: int, user_id: int) -> bool:
+    try:
+        if repo.is_leader(chat_id, user_id):
+            return True
+    except Exception:
+        pass
+    try:
+        member = await bot.get_chat_member(chat_id, user_id)
+        return getattr(member, "status", None) in {"creator", "administrator"}
+    except Exception:
+        return False
+# =================================================================================
+
+
 # ====== Цель по умолчанию и индивидуальные дефолты по играм ======
 DEFAULT_TARGET = 10
-TARGET_BY_GAME = {
-    "doors": 6,  # 👈 для Doors хотим 6 человек
-}
+TARGET_BY_GAME = {"doors": 6}  # 👈 для Doors хотим 6 человек
 def target_for(game_key: str) -> int:
     return TARGET_BY_GAME.get(game_key, DEFAULT_TARGET)
 
@@ -33,9 +40,15 @@ async def cmd_start(message: Message, repo: SupabaseRepo):
     u = message.from_user
     if not u:
         return
-    # фиксируем пользователя в БД, чтобы потом его можно было тегать
     repo.upsert_user(u.id, u.username, u.first_name, u.last_name)
-    await message.reply(WELCOME)
+    await message.reply(
+        "Привет! Я помогаю тегать участников на быстрые игры.\n\n"
+        "• /games — список игр\n"
+        "• /call <игра> — начать набор (пример: /call codenames)\n"
+        "• /optout — не упоминать меня\n"
+        "• /optin — снова упоминать\n\n"
+        "Также доступны алиасы: /call_codenames, /call_bunker, /call_alias, /call_gartic, /call_mafia, /call_doors."
+    )
 
 
 @router.message(Command("optout"))
@@ -92,12 +105,12 @@ async def cmd_call(
 
     bot: Bot = message.bot
     if not await is_admin_or_leader(bot, repo, chat_id, u.id):
-        await message.reply(NO_RIGHTS)
+        await message.reply("⛔ Эту команду могут использовать только админы или ведущие.")
         return
 
     query = (command.args or "").strip()
     if not query:
-        await message.reply("Укажи игру: <code>/call codenames</code>\nСмотри /games")
+        await message.reply("Укажи игру: /call codenames | bunker | alias | gartic | mafia | doors")
         return
 
     preset = _find_preset(repo, query)
@@ -105,201 +118,66 @@ async def cmd_call(
         await message.reply("Игра не найдена. Смотри список: /games")
         return
 
-    await _ensure_session_and_controls(message, repo, session_service, preset)
+    # закрываем старую активную сессию, чтобы не копилось
+    old = repo.get_active_session(chat_id, preset.game_key)
+    if old:
+        try:
+            repo.close_session(old["session_id"])
+        except Exception:
+            pass
+
+    # создаём новую
+    session = repo.create_session(
+        chat_id, preset.game_key, u.id, target_count=target_for(preset.game_key)
+    )
+
+    # публикуем шапку RSVP и кнопку "Позвать всех"
+    await session_service.post_or_get_session_message(chat_id, preset, session)
+
+    kb = InlineKeyboardBuilder()
+    kb.button(
+        text=f"Позвать всех на {preset.title}",
+        callback_data=f"callall:{session['session_id']}:{preset.game_key}",
+    )
+    await message.answer("Управление набором:", reply_markup=kb.as_markup())
 
 
 # =========================
 # Алиасы /call_<game>
 # =========================
 @router.message(Command("call_codenames"))
-async def cmd_call_codenames(message: Message, repo: SupabaseRepo, session_service: SessionService):
+async def call_codenames(message: Message, repo: SupabaseRepo, session_service: SessionService):
     await _call_by_key("codenames", message, repo, session_service)
 
 @router.message(Command("call_bunker"))
-async def cmd_call_bunker(message: Message, repo: SupabaseRepo, session_service: SessionService):
+async def call_bunker(message: Message, repo: SupabaseRepo, session_service: SessionService):
     await _call_by_key("bunker", message, repo, session_service)
 
 @router.message(Command("call_alias"))
-async def cmd_call_alias(message: Message, repo: SupabaseRepo, session_service: SessionService):
+async def call_alias(message: Message, repo: SupabaseRepo, session_service: SessionService):
     await _call_by_key("alias", message, repo, session_service)
 
 @router.message(Command("call_gartic"))
-async def cmd_call_gartic(message: Message, repo: SupabaseRepo, session_service: SessionService):
+async def call_gartic(message: Message, repo: SupabaseRepo, session_service: SessionService):
     await _call_by_key("gartic", message, repo, session_service)
 
 @router.message(Command("call_mafia"))
-async def cmd_call_mafia(message: Message, repo: SupabaseRepo, session_service: SessionService):
+async def call_mafia(message: Message, repo: SupabaseRepo, session_service: SessionService):
     await _call_by_key("mafia", message, repo, session_service)
 
 @router.message(Command("call_doors"))
-async def cmd_call_doors(message: Message, repo: SupabaseRepo, session_service: SessionService):
+async def call_doors(message: Message, repo: SupabaseRepo, session_service: SessionService):
     await _call_by_key("doors", message, repo, session_service)
-
-
-# =========================
-# УПРАВЛЕНИЕ ЦЕЛЬЮ НАБОРА
-# =========================
-@router.message(Command("target"))
-async def cmd_target(
-    message: Message,
-    repo: SupabaseRepo,
-    session_service: SessionService,
-    command: CommandObject,
-):
-    """
-    /target <число> — сменить цель (например, 6) для текущей активной сессии в этом чате.
-    Работает только для админов/ведущих.
-    """
-    chat_id = message.chat.id
-    u = message.from_user
-    bot: Bot = message.bot
-
-    if not await is_admin_or_leader(bot, repo, chat_id, u.id):
-        await message.reply(NO_RIGHTS)
-        return
-
-    arg = (command.args or "").strip()
-    if not arg.isdigit():
-        await message.reply("Укажи число: например <code>/target 6</code>")
-        return
-    new_target = int(arg)
-    if not (1 <= new_target <= 1000):
-        await message.reply("Число должно быть от 1 до 1000.")
-        return
-
-    # найдём самую свежую активную сессию в этом чате (любой игры)
-    res = (
-        repo.client.table("gt_sessions")
-        .select("*")
-        .eq("chat_id", chat_id)
-        .eq("is_closed", False)
-        .order("created_at", desc=True)
-        .limit(1)
-        .execute()
-        .data
-    )
-    if not res:
-        await message.reply("Активная сессия не найдена.")
-        return
-    session = res[0]
-
-    # обновим цель
-    repo.set_session_target(session["session_id"], new_target)
-    session["target_count"] = new_target  # чтобы перерисовать сразу корректно
-
-    # перерисуем «шапку»
-    preset = repo.get_preset(session["game_key"])
-    await session_service.post_or_get_session_message(chat_id, preset, session)
-    await message.reply(f"Цель набора обновлена: <b>{new_target}</b>")
-
-
-# =========================
-# РОЛИ И ИСКЛЮЧЕНИЯ
-# =========================
-@router.message(Command("lead"))
-async def cmd_lead(message: Message, repo: SupabaseRepo):
-    """
-    Выдать/снять права ведущего. Делается ответом на сообщение нужного пользователя.
-    """
-    if not message.reply_to_message or not message.reply_to_message.from_user:
-        await message.reply(
-            "Сделайте команду ответом на сообщение пользователя, чтобы выдать/снять права ведущего."
-        )
-        return
-
-    chat_id = message.chat.id
-    admin_id = message.from_user.id if message.from_user else None
-    user_id = message.reply_to_message.from_user.id
-
-    bot: Bot = message.bot
-    if not await is_admin_or_leader(bot, repo, chat_id, admin_id):
-        await message.reply(NO_RIGHTS)
-        return
-
-    if repo.is_leader(chat_id, user_id):
-        repo.remove_leader(chat_id, user_id)
-        await message.reply("Права ведущего сняты.")
-    else:
-        repo.add_leader(chat_id, user_id, admin_id)
-        await message.reply("Права ведущего выданы.")
-
-
-@router.message(Command("leaders"))
-async def cmd_leaders(message: Message, repo: SupabaseRepo):
-    leaders = repo.list_leaders(message.chat.id)
-    if not leaders:
-        await message.reply("В этом чате пока нет ведущих.")
-        return
-
-    txt = "Ведущие: " + ", ".join(
-        [f'<a href="tg://user?id={uid}">{uid}</a>' for uid in leaders]
-    )
-    await message.reply(txt, disable_web_page_preview=True)
-
-
-@router.message(Command("exclude"))
-async def cmd_exclude(message: Message, repo: SupabaseRepo):
-    """
-    Исключить пользователя из упоминаний в этом чате (админ/ведущий).
-    Делайте команду ответом на сообщение нужного пользователя.
-    """
-    if not message.reply_to_message or not message.reply_to_message.from_user:
-        await message.reply(
-            "Сделайте команду ответом на сообщение пользователя для исключения."
-        )
-        return
-
-    chat_id = message.chat.id
-    admin_id = message.from_user.id if message.from_user else None
-    user_id = message.reply_to_message.from_user.id
-
-    bot: Bot = message.bot
-    if not await is_admin_or_leader(bot, repo, chat_id, admin_id):
-        await message.reply(NO_RIGHTS)
-        return
-
-    repo.exclude(chat_id, user_id, admin_id)
-    await message.reply("Пользователь исключён из упоминаний в этом чате.")
-
-
-@router.message(Command("include"))
-async def cmd_include(message: Message, repo: SupabaseRepo):
-    """
-    Вернуть пользователя в упоминания в этом чате (админ/ведущий).
-    Делайте команду ответом на сообщение нужного пользователя.
-    """
-    if not message.reply_to_message or not message.reply_to_message.from_user:
-        await message.reply(
-            "Сделайте команду ответом на сообщение пользователя для включения."
-        )
-        return
-
-    chat_id = message.chat.id
-    admin_id = message.from_user.id if message.from_user else None
-    user_id = message.reply_to_message.from_user.id
-
-    bot: Bot = message.bot
-    if not await is_admin_or_leader(bot, repo, chat_id, admin_id):
-        await message.reply(NO_RIGHTS)
-        return
-
-    repo.include(chat_id, user_id)
-    await message.reply("Пользователь возвращён в упоминания в этом чате.")
 
 
 # =========================
 # ВСПОМОГАТЕЛЬНЫЕ
 # =========================
 def _find_preset(repo: SupabaseRepo, query: str) -> Preset | None:
-    """
-    Ищем пресет по ключу или названию (без регистра; допускаем часть названия).
-    """
     q = query.lower().strip()
-    # точное совпадение по ключу
     p = repo.get_preset(q)
     if p:
         return p
-    # поиск по названию среди активных
     for item in repo.list_active_presets():
         title = (item.title or "").lower()
         if title == q or q in title:
@@ -307,40 +185,33 @@ def _find_preset(repo: SupabaseRepo, query: str) -> Preset | None:
     return None
 
 
-async def _call_by_key(game_key: str, message: Message, repo: SupabaseRepo, session_service: SessionService):
+async def _call_by_key(
+    game_key: str, message: Message, repo: SupabaseRepo, session_service: SessionService
+):
     preset = repo.get_preset(game_key)
     if not preset:
         await message.reply("Пресет не найден или отключён.")
         return
-    await _ensure_session_and_controls(message, repo, session_service, preset)
 
+    # закрываем старую активную сессию
+    old = repo.get_active_session(message.chat.id, game_key)
+    if old:
+        try:
+            repo.close_session(old["session_id"])
+        except Exception:
+            pass
 
-async def _ensure_session_and_controls(
-    message: Message,
-    repo: SupabaseRepo,
-    session_service: SessionService,
-    preset: Preset,
-):
-    chat_id = message.chat.id
-    u = message.from_user
-    bot: Bot = message.bot
+    # создаём новую
+    session = repo.create_session(
+        message.chat.id, game_key, message.from_user.id, target_count=target_for(game_key)
+    )
 
-    if not await is_admin_or_leader(bot, repo, chat_id, u.id):
-        await message.reply(NO_RIGHTS)
-        return
-
-    session = repo.get_active_session(chat_id, preset.game_key)
-    if not session:
-        session = repo.create_session(
-            chat_id, preset.game_key, u.id, target_count=target_for(preset.game_key)
-        )
-
-    # публикуем/обновляем «шапку» сессии и даём кнопку «Позвать всех на {title}»
-    await session_service.post_or_get_session_message(chat_id, preset, session)
+    # публикуем шапку RSVP
+    await session_service.post_or_get_session_message(message.chat.id, preset, session)
 
     kb = InlineKeyboardBuilder()
     kb.button(
-        text=button_call_all(preset.title),
-        callback_data=f"callall:{session['session_id']}:{preset.game_key}",
+        text=f"Позвать всех на {preset.title}",
+        callback_data=f"callall:{session['session_id']}:{game_key}",
     )
     await message.answer("Управление набором:", reply_markup=kb.as_markup())
