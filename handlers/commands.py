@@ -96,7 +96,7 @@ async def cmd_games(message: Message, repo: SupabaseRepo):
         lines.append(f"• <b>{p.title}</b>  (<code>{p.game_key}</code>)")
     lines.append("")
     lines.append("Запуск набора: <code>/call &lt;игра&gt;</code>")
-    lines.append("Примеры: <code>/call codenames</code>, <code>/call bunker</code>")
+    lines.append("Примеры: /call_codenames, /call_bunker")
     await message.reply("\n".join(lines), parse_mode="HTML")
 
 
