@@ -138,7 +138,7 @@ class SessionService:
             # Отдельная строка, одна кнопка — занимает всю ширину
             kb.row(
                 InlineKeyboardButton(
-                    text="Изменить количество человек",
+                    text="Изменить количество участников",
                     callback_data=f"change_target:{session_id}",
                 )
             )
