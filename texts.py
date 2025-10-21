@@ -5,7 +5,7 @@ from typing import Optional, List
 WELCOME = (
     "Привет! Я помогаю тегать участников на быстрые игры.\n"
     "• /games — список игр\n"
-    "• <code>/call &lt;игра&gt;</code> — начать набор (пример: <code>/call codenames</code>)\n"
+    "• <code>/call &lt;игра&gt;</code> — начать набор (пример: <code>/call_codenames</code>)\n"
     "• /optout — не упоминать меня\n"
     "• /optin — снова упоминать\n"
 )
