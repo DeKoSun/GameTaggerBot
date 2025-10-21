@@ -55,7 +55,7 @@ async def cmd_start(message: Message, repo: SupabaseRepo):
     await message.reply(
         "Привет! Я помогаю тегать участников на быстрые игры.\n\n"
         "• /games — список игр\n"
-        "• <code>/call &lt;игра&gt;</code> — начать набор (пример: <code>/call_codenames</code>)\n"
+        "• <code>/call &lt;игра&gt;</code> — начать набор (пример: <code>/call codenames</code>)\n"
         "• /optout — не упоминать меня\n"
         "• /optin — снова упоминать\n\n"
         "Также доступны команды: /call_codenames, /call_bunker, /call_alias, "
@@ -97,7 +97,7 @@ async def cmd_games(message: Message, repo: SupabaseRepo):
     lines.append("")
     lines.append("Запуск набора: <code>/call &lt;игра&gt;</code>")
     lines.append("Примеры: <code>/call codenames</code>, <code>/call bunker</code>")
-    await message.reply("\n".join(lines))
+    await message.reply("\n".join(lines), parse_mode="HTML")
 
 
 # =========================
@@ -184,6 +184,112 @@ async def call_mafia(message: Message, repo: SupabaseRepo, session_service: Sess
 @router.message(Command("call_doors"))
 async def call_doors(message: Message, repo: SupabaseRepo, session_service: SessionService):
     await _call_by_key("doors", message, repo, session_service)
+
+
+# =========================
+# ВЕДУЩИЕ (leaders)
+# =========================
+async def _resolve_target_user_id(message: Message, repo: SupabaseRepo) -> int | None:
+    """
+    Ищем целевого пользователя:
+    1) если команда отправлена в ответ на сообщение — берём автора реплая
+    2) если есть @username вторым словом — пытаемся найти в БД (gt_users)
+    """
+    if message.reply_to_message and message.reply_to_message.from_user:
+        return message.reply_to_message.from_user.id
+
+    if message.text:
+        parts = message.text.strip().split(maxsplit=1)
+        if len(parts) == 2:
+            raw = parts[1].strip()
+            if raw.startswith("@"):
+                uname = raw[1:]
+                try:
+                    return repo.get_user_id_by_username(uname)
+                except Exception:
+                    return None
+    return None
+
+
+@router.message(Command("leaders"))
+async def cmd_leaders(message: Message, repo: SupabaseRepo):
+    if not message.chat or message.chat.type not in {"group", "supergroup"}:
+        await message.reply("Эта команда работает только в группах.")
+        return
+
+    leaders = repo.list_leaders(message.chat.id)
+    if not leaders:
+        await message.reply("В этом чате пока нет ведущих.")
+        return
+
+    lines = ["<b>Ведущие чата:</b>"]
+    for u in leaders:
+        label = f"@{u['username']}" if u.get("username") else (u.get("first_name") or str(u["user_id"]))
+        lines.append(f"• {label}")
+    await message.reply("\n".join(lines), parse_mode="HTML")
+
+
+@router.message(Command("lead"))
+async def cmd_lead(message: Message, repo: SupabaseRepo):
+    if not message.chat or message.chat.type not in {"group", "supergroup"}:
+        await message.reply("Эта команда работает только в группах.")
+        return
+
+    bot: Bot = message.bot
+    # Назначать может только админ Телеграма (или владелец)
+    is_admin = False
+    try:
+        member = await bot.get_chat_member(message.chat.id, message.from_user.id)
+        is_admin = getattr(member, "status", None) in {"creator", "administrator"}
+    except Exception:
+        pass
+
+    if not is_admin:
+        await message.reply("⛔ Назначать ведущих может только админ чата.")
+        return
+
+    target_id = await _resolve_target_user_id(message, repo)
+    if not target_id:
+        await message.reply("Укажи пользователя: ответь на его сообщение командой /lead или напиши /lead @username")
+        return
+
+    # проверим, что пользователь в чате
+    try:
+        await bot.get_chat_member(message.chat.id, target_id)
+    except Exception:
+        await message.reply("Пользователь не найден в этом чате.")
+        return
+
+    repo.add_leader(message.chat.id, target_id, message.from_user.id)
+    await message.reply("Готово. Пользователь назначен ведущим.")
+
+
+@router.message(Command("unlead"))
+async def cmd_unlead(message: Message, repo: SupabaseRepo):
+    if not message.chat or message.chat.type not in {"group", "supergroup"}:
+        await message.reply("Эта команда работает только в группах.")
+        return
+
+    bot: Bot = message.bot
+    # Снимать может только админ Телеграма (или владелец)
+    is_admin = False
+    try:
+        member = await bot.get_chat_member(message.chat.id, message.from_user.id)
+        is_admin = getattr(member, "status", None) in {"creator", "administrator"}
+    except Exception:
+        pass
+
+    if not is_admin:
+        await message.reply("⛔ Снимать ведущих может только админ чата.")
+        return
+
+    target_id = await _resolve_target_user_id(message, repo)
+    if not target_id:
+        await message.reply("Укажи пользователя: ответь на его сообщение командой /unlead или напиши /unlead @username")
+        return
+
+    repo.remove_leader(message.chat.id, target_id)
+    await message.reply("Готово. Пользователь снят с роли ведущего.")
 
 
 # =========================

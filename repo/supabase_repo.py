@@ -8,8 +8,7 @@ from supabase import create_client, Client
 
 from config import Settings
 
-# Мы читаем env в main.py -> Settings.from_env()
-# Здесь создаём клиент уже на готовых переменных
+# env читается в main.py -> Settings.from_env()
 _settings = Settings.from_env()
 
 
@@ -29,7 +28,7 @@ class SupabaseRepo:
         )
 
     # ---------------------------
-    # App settings (глобальные настройки)
+    # App settings (глобальные)
     # ---------------------------
 
     def get_app_setting(self, key: str) -> Optional[str]:
@@ -101,6 +100,24 @@ class SupabaseRepo:
         )
         return res.data or None
 
+    def get_user_id_by_username(self, username: str) -> Optional[int]:
+        """
+        Возвращает user_id по @username (без @). Поиск регистронезависимый.
+        Возвращает None, если пользователь не найден в gt_users.
+        """
+        uname = (username or "").strip().lstrip("@")
+        if not uname:
+            return None
+        res = (
+            self.client.table("gt_users")
+            .select("user_id,username")
+            .ilike("username", uname)
+            .limit(1)
+            .execute()
+        )
+        rows = res.data or []
+        return rows[0]["user_id"] if rows else None
+
     # ---------------------------
     # Leaders
     # ---------------------------
@@ -126,14 +143,29 @@ class SupabaseRepo:
             {"chat_id": chat_id, "user_id": user_id}
         ).execute()
 
-    def list_leaders(self, chat_id: int) -> List[int]:
+    def list_leaders(self, chat_id: int) -> List[Dict[str, Any]]:
+        """
+        Возвращает список словарей с полями:
+        { user_id, username, first_name }
+        """
+        # берём все user_id лидеров этого чата
         res = (
             self.client.table("gt_leaders")
             .select("user_id")
             .eq("chat_id", chat_id)
             .execute()
         )
-        return [row["user_id"] for row in (res.data or [])]
+        ids = [r["user_id"] for r in (res.data or [])]
+        if not ids:
+            return []
+        # подтягиваем карточки пользователей
+        res2 = (
+            self.client.table("gt_users")
+            .select("user_id,username,first_name")
+            .in_("user_id", ids)
+            .execute()
+        )
+        return res2.data or []
 
     # ---------------------------
     # Exclusions
