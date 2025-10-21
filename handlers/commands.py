@@ -55,7 +55,7 @@ async def cmd_start(message: Message, repo: SupabaseRepo):
     await message.reply(
         "Привет! Я помогаю тегать участников на быстрые игры.\n\n"
         "• /games — список игр\n"
-        "• <code>/call &lt;игра&gt;</code> — начать набор (пример: <code>/call codenames</code>)\n"
+        "• /call &lt;игра&gt; — начать набор (пример: /call codenames)\n"
         "• /optout — не упоминать меня\n"
         "• /optin — снова упоминать\n\n"
         "Также доступны команды: /call_codenames, /call_bunker, /call_alias, "
