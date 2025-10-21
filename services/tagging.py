@@ -4,12 +4,18 @@ import asyncio
 import html
 import random
 import re
-from typing import Optional, List
+from typing import Optional, List, Dict
 
 from aiogram import Bot
 from aiogram.exceptions import TelegramBadRequest
 
+# если у тебя импорт из корня — оставь этот
 from repo.supabase_repo import SupabaseRepo, Preset
+# если проект лежит иначе, можно переключить на:
+# try:
+#     from supabase_repo import SupabaseRepo, Preset
+# except ModuleNotFoundError:
+#     from repo.supabase_repo import SupabaseRepo, Preset
 
 
 BATCH_DEFAULT = 15
@@ -19,13 +25,17 @@ TG_MAX_MESSAGE_LEN = 4096
 
 class TaggingService:
     """
-    Отвечает за отправку персональных упоминаний батчами:
-      - Формирует HTML-упоминания (<a href="tg://user?id=...">label</a>)
-      - Конвертирует **bold** из шаблонов в <b>bold</b>
-      - Отправляет партиями с паузами
-      - Может остановиться, если по сессии набралось target_count 'going'
-      - Анти-повтор: не повторяет одну и ту же invite-фразу подряд для одной игры
-      - Фильтрует тех, кто реально состоит в чате (creator/administrator/member)
+    Батчевый тегинг с персональными фразами-приглашениями.
+
+    Теперь:
+    - В ОДНОМ СОЗЫВЕ фразы не повторяются между пользователями,
+      пока хватает вариантов в пресете (у тебя по 100 на игру — отлично).
+    - «Анти-повтор для пользователя»: если выбранная фраза совпадает с его
+      прошлой по ЭТОЙ игре — сдвигаем на следующую.
+    - Фразы для каждого пользователя сохраняются в gt_app_settings под ключом:
+        last_invite:<game_key>:<user_id>
+    - Фильтруем присутствующих в чате (creator/administrator/member).
+    - Паузируем между батчами и останавливаемся, если достигнут target.
     """
 
     def __init__(self, bot: Bot, repo: SupabaseRepo) -> None:
@@ -44,32 +54,39 @@ class TaggingService:
         session_id: Optional[str] = None,
     ) -> None:
         """
-        Отправляет теги батчами. Если передан session_id — между батчами проверяем,
-        достигнута ли цель по RSVP 'going' и останавливаемся.
+        Отправляет теги батчами. При session_id между батчами проверяем достижение цели.
         """
 
         per_batch = max(1, int(per_batch))
-        invitees = list(dict.fromkeys(invitees))  # unique, сохраняем порядок
+        # unique + сохранение порядка
+        invitees = list(dict.fromkeys(invitees))
 
-        # NEW: фильтруем только тех, кто реально состоит в чате сейчас
+        # Оставляем только реально присутствующих в чате
         invitees = await self.filter_present_members(chat_id, invitees)
         if not invitees:
             await self._safe_send_message(chat_id, "Некого звать: в чате нет подходящих участников.")
             return
 
-        for start in range(0, len(invitees), per_batch):
-            batch = invitees[start : start + per_batch]
-            text = self._build_batch_text(preset, batch)
+        # Подбираем приглашение ДЛЯ КАЖДОГО пользователя сразу —
+        # чтобы в одном созыве не было повторов между людьми.
+        picks = self._pick_lines_for_users(preset, invitees)
+        # превратим в список строк для отправки (упоминание + фраза)
+        mentions: List[str] = [
+            f'<a href="tg://user?id={uid}">{self._label_for_user(uid)}</a> — {picks[uid]}'
+            for uid in invitees
+        ]
 
-            # Страхуемся от лимита 4096 символов
+        # Рассылаем батчами
+        for start in range(0, len(mentions), per_batch):
+            batch_lines = mentions[start : start + per_batch]
+            text = "\n".join(batch_lines)
+
             if len(text) > TG_MAX_MESSAGE_LEN:
-                # грубый фоллбек: режем по строкам
                 for chunk in self._split_by_lines(text):
                     await self._safe_send_message(chat_id, chunk)
             else:
                 await self._safe_send_message(chat_id, text)
 
-            # Авто-стоп при достижении цели
             if session_id and await self._reached_target(session_id):
                 break
 
@@ -80,10 +97,10 @@ class TaggingService:
     async def filter_present_members(self, chat_id: int, user_ids: List[int]) -> List[int]:
         """
         Возвращает только тех user_id, кто реально состоит в чате:
-        статусы creator/administrator/member. Остальные (left/kicked/restricted) отбрасываются.
+        creator/administrator/member. Остальные (left/kicked/restricted) отбрасываются.
         """
         ok_status = {"creator", "administrator", "member"}
-        sem = asyncio.Semaphore(20)  # ограничим параллелизм, чтобы не словить FLOOD
+        sem = asyncio.Semaphore(20)  # ограничим параллелизм
 
         async def check(uid: int) -> tuple[int, bool]:
             async with sem:
@@ -91,85 +108,74 @@ class TaggingService:
                     m = await self.bot.get_chat_member(chat_id, uid)
                     return uid, (getattr(m, "status", None) in ok_status)
                 except TelegramBadRequest:
-                    # пользователя нельзя проверить или его нет в чате
                     return uid, False
                 except Exception:
-                    # сетевые/прочие — тихо отбрасываем
                     return uid, False
 
         results = await asyncio.gather(*(check(uid) for uid in user_ids))
         return [uid for uid, ok in results if ok]
 
-    # -------------------------- helpers --------------------------
+    # -------------------------- picking logic --------------------------
 
-    def _build_batch_text(self, preset: Preset, user_ids: List[int]) -> str:
+    def _pick_lines_for_users(self, preset: Preset, user_ids: List[int]) -> Dict[int, str]:
         """
-        Строит текст батча построчно:
-          <a href="tg://user?id=...">label</a> — <invite_line>
+        Раздаёт фразы пользователям так, чтобы:
+        - внутри ЭТОГО созыва повторы между людьми не встречались, пока хватает вариантов,
+        - если людей больше, чем фраз — фразы идут по циклу (в случайном порядке),
+        - «анти-повтор для пользователя»: если выданная фраза совпадает с его последней,
+          сдвигаем на следующую в цикле,
+        - результат: {user_id: invite_html}.
         """
-        # анти-повтор: берём новую фразу с учётом последней
-        invite_html = self._pick_invite_line_html(preset)
+        lines_raw = (preset.invite_lines or [])[:]
+        if not lines_raw:
+            lines_raw = ["заглядывай!"]  # страховка
 
-        lines: List[str] = []
-        for uid in user_ids:
-            label = self._label_for_user(uid)
-            mention = f'<a href="tg://user?id={uid}">{label}</a>'
-            lines.append(f"{mention} — {invite_html}")
-        # Сообщение отправляется с parse_mode=HTML
-        return "\n".join(lines)
+        # Для справедливости перетасуем «колоду» фраз
+        random.shuffle(lines_raw)
+        n = len(lines_raw)
 
-    def _pick_invite_line_html(self, preset: Preset) -> str:
-        """
-        Выбираем invite-фразу с анти-повтором:
-        - читаем из gt_app_settings последнюю фразу для игры
-        - выбираем новую, отличную от последней (если это возможно)
-        - сохраняем как последнюю
-        - конвертируем **жирный** в <b>…</b> и экранируем остальное
-        """
-        lines = preset.invite_lines or []
-        if not lines:
-            return ""
+        # Случайный стартовый сдвиг, чтобы разные созывы начинались с разных мест
+        start = random.randrange(n)
 
-        last_key = f"last_invite_{preset.game_key}"
-        try:
-            last_line = self.repo.get_app_setting(last_key)
-        except Exception:
+        picked: Dict[int, str] = {}
+        for idx, uid in enumerate(user_ids):
+            base_idx = (start + idx) % n
+            phrase = lines_raw[base_idx]
+
+            # анти-повтор для КОНКРЕТНОГО пользователя
+            last_key = f"last_invite:{preset.game_key}:{uid}"
             last_line = None
+            try:
+                last_line = self.repo.get_app_setting(last_key)
+            except Exception:
+                pass
 
-        # Если только одна строка в пуле — берём её
-        if len(lines) == 1:
-            chosen = lines[0]
-        else:
-            chosen = random.choice(lines)
-            if last_line and chosen == last_line:
-                # выбрать альтернативу
-                alts = [x for x in lines if x != last_line]
-                if alts:
-                    chosen = random.choice(alts)
+            if n > 1 and last_line == phrase:
+                phrase = lines_raw[(base_idx + 1) % n]
 
-        # сохраняем выбранную строку как последнюю
-        try:
-            self.repo.set_app_setting(last_key, chosen)
-        except Exception:
-            # не критично, продолжаем без сохранения
-            pass
+            # сохраняем пользователю и фиксируем «последнюю»
+            picked[uid] = self._md_to_html(phrase)
+            try:
+                self.repo.set_app_setting(last_key, phrase)
+            except Exception:
+                pass
 
-        return self._md_to_html(chosen)
+        return picked
+
+    # -------------------------- helpers --------------------------
 
     def _label_for_user(self, user_id: int) -> str:
         """
-        Собираем красивую подпись: @username -> иначе Имя -> иначе 'игрок'
-        Все части экранируем.
+        Красивый лейбл: @username -> Имя -> 'игрок'. Всё экранируем.
         """
         try:
-            u = self.repo.get_user_public(user_id)  # ожидается метод в репозитории
+            u = self.repo.get_user_public(user_id)
         except Exception:
             u = None
 
         if u and u.get("username"):
             return html.escape(f"@{u['username']}")
         if u and u.get("first_name"):
-            # Можно добавить last_name при желании
             return html.escape(u["first_name"])
         return html.escape("игрок")
 
@@ -179,28 +185,19 @@ class TaggingService:
         Лёгкая конвертация markdown-**жирного** в HTML <b>…</b>,
         остальное экранируем.
         """
-        # Сохраняем жирные участки, остальное экранируем
-        # Шаг 1: временно пометим жирные фрагменты
         placeholder_open = "\u0001"
         placeholder_close = "\u0002"
 
         def mark_bold(m: re.Match) -> str:
-            inner = m.group(1)
-            return f"{placeholder_open}{inner}{placeholder_close}"
+            return f"{placeholder_open}{m.group(1)}{placeholder_close}"
 
         marked = re.sub(r"\*\*(.+?)\*\*", mark_bold, text)
-
-        # Шаг 2: экранируем весь текст как HTML
         escaped = html.escape(marked)
-
-        # Шаг 3: заменяем плейсхолдеры на <b>…</b>
-        escaped = escaped.replace(placeholder_open, "<b>").replace(placeholder_close, "</b>")
-
-        return escaped
+        return escaped.replace(placeholder_open, "<b>").replace(placeholder_close, "</b>")
 
     async def _reached_target(self, session_id: str) -> bool:
         """
-        Проверяем, достигнут ли target_count по going для сессии.
+        Проверяем, достигнут ли target_count по 'going' для сессии.
         """
         try:
             sess = (
@@ -227,7 +224,6 @@ class TaggingService:
                 disable_web_page_preview=True,
             )
         except Exception:
-            # краткая задержка и одна повторная попытка
             await asyncio.sleep(0.5)
             try:
                 await self.bot.send_message(
@@ -237,13 +233,12 @@ class TaggingService:
                     disable_web_page_preview=True,
                 )
             except Exception:
-                # гасим окончательно — не валим цикл батчей
                 pass
 
     @staticmethod
     def _split_by_lines(text: str) -> List[str]:
         """
-        Режем большое сообщение на части по строкам, чтобы укладываться в лимит Telegram.
+        Режем длинное сообщение по строкам, чтобы уложиться в 4096 символов.
         """
         parts: List[str] = []
         current: List[str] = []
