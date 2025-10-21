@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import html
 import re
-from typing import Optional, List
+from typing import List
 
 from aiogram import Bot
-from aiogram.types import Message, InlineKeyboardMarkup
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 # Устойчивые импорты (корень или подпапки)
@@ -117,23 +117,31 @@ class SessionService:
         """
         Основная клавиатура:
         - ряд RSVP-кнопок;
-        - кнопка «Изменить количество (N)» ИЛИ быстрый выбор [3,4,5,6,8,10,12] + «Назад».
+        - отдельная строка с кнопкой «Изменить количество человек» (во всю ширину),
+          либо быстрый выбор [3,4,5,6,8,10,12] + «Назад».
         """
         kb = InlineKeyboardBuilder()
-        # RSVP
+
+        # RSVP (одной строкой)
         kb.button(text=texts.BTN_GO, callback_data=f"rsvp:going:{session_id}")
         kb.button(text=texts.BTN_MAYBE, callback_data=f"rsvp:maybe:{session_id}")
         kb.button(text=texts.BTN_NO, callback_data=f"rsvp:no:{session_id}")
         kb.row()
 
         if show_picker:
-            # Быстрые варианты
+            # Быстрые варианты количества
             for n in (3, 4, 5, 6, 8, 10, 12):
                 kb.button(text=str(n), callback_data=f"set_target:{session_id}:{n}")
             kb.row()
             kb.button(text="⬅️ Назад", callback_data=f"target_back:{session_id}")
         else:
-            kb.button(text=f"Изменить количество ({int(target)})", callback_data=f"change_target:{session_id}")
+            # Отдельная строка, одна кнопка — занимает всю ширину
+            kb.row(
+                InlineKeyboardButton(
+                    text="Изменить количество человек",
+                    callback_data=f"change_target:{session_id}",
+                )
+            )
 
         return kb.as_markup()
 
