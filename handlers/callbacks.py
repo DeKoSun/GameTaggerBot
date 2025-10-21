@@ -44,6 +44,9 @@ async def is_admin_or_leader(bot, repo: SupabaseRepo, chat_id: int, user_id: int
         return False
 
 
+# =========================
+# RSVP
+# =========================
 @router.callback_query(lambda c: c.data and c.data.startswith("rsvp:"))
 async def cb_rsvp(
     call: CallbackQuery,
@@ -110,6 +113,138 @@ async def cb_rsvp(
     await call.answer("Принято")
 
 
+# =========================
+# Изменение количества участников (цели)
+# =========================
+@router.callback_query(lambda c: c.data and c.data.startswith("change_target:"))
+async def cb_change_target(
+    call: CallbackQuery,
+    repo: SupabaseRepo,
+    session_service: SessionService,
+):
+    """
+    Включаем «режим выбора» чисел (редактируем клавиатуру в шапке).
+    """
+    try:
+        _, session_id = call.data.split(":", 1)
+    except Exception:
+        await call.answer("Некорректные данные.", show_alert=True)
+        return
+
+    if not call.message:
+        await call.answer()
+        return
+
+    # права
+    if not await is_admin_or_leader(call.message.bot, repo, call.message.chat.id, call.from_user.id):
+        await call.answer("Нет прав.", show_alert=True)
+        return
+
+    session = repo.get_session(session_id)
+    if not session:
+        await call.answer("Сессия не найдена.", show_alert=True)
+        return
+
+    preset = repo.get_preset(session["game_key"])
+    if not preset:
+        await call.answer("Пресет не найден.", show_alert=True)
+        return
+
+    # включаем режим выбора чисел
+    await session_service.post_or_get_session_message(
+        call.message.chat.id, preset, session, show_target_picker=True
+    )
+    await call.answer()
+
+
+@router.callback_query(lambda c: c.data and c.data.startswith("set_target:"))
+async def cb_set_target(
+    call: CallbackQuery,
+    repo: SupabaseRepo,
+    session_service: SessionService,
+):
+    """
+    Сохраняем новую цель и «тихо» перерисовываем шапку без доп. сообщений.
+    Формат: set_target:<session_id>:<n>
+    """
+    try:
+        _, session_id, n = call.data.split(":", 2)
+        target = int(n)
+    except Exception:
+        await call.answer("Некорректные данные.", show_alert=True)
+        return
+
+    if not call.message:
+        await call.answer()
+        return
+
+    # права
+    if not await is_admin_or_leader(call.message.bot, repo, call.message.chat.id, call.from_user.id):
+        await call.answer("Нет прав.", show_alert=True)
+        return
+
+    session = repo.get_session(session_id)
+    if not session:
+        await call.answer("Сессия не найдена.", show_alert=True)
+        return
+
+    preset = repo.get_preset(session["game_key"])
+    if not preset:
+        await call.answer("Пресет не найден.", show_alert=True)
+        return
+
+    # обновляем цель в БД и перерисовываем «шапку»
+    try:
+        repo.set_session_target(session_id, target)
+        session["target_count"] = target
+        await session_service.post_or_get_session_message(
+            call.message.chat.id, preset, session, show_target_picker=False
+        )
+    except Exception:
+        await call.answer("Не удалось обновить количество.", show_alert=True)
+        return
+
+    await call.answer()  # тихо
+
+
+@router.callback_query(lambda c: c.data and c.data.startswith("target_back:"))
+async def cb_target_back(
+    call: CallbackQuery,
+    repo: SupabaseRepo,
+    session_service: SessionService,
+):
+    """
+    Выходим из режима выбора чисел — возвращаем обычные кнопки.
+    """
+    try:
+        _, session_id = call.data.split(":", 1)
+    except Exception:
+        await call.answer()
+        return
+
+    if not call.message:
+        await call.answer()
+        return
+
+    session = repo.get_session(session_id)
+    if not session:
+        await call.answer()
+        return
+
+    preset = repo.get_preset(session["game_key"])
+    if not preset:
+        await call.answer()
+        return
+
+    await session_service.post_or_get_session_message(
+        call.message.chat.id, preset, session, show_target_picker=False
+    )
+    await call.answer()
+
+
+# =========================
+# Позвать всех
+# =========================
 @router.callback_query(lambda c: c.data and c.data.startswith("callall:"))
 async def cb_call_all(
     call: CallbackQuery,
